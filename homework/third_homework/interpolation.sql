@@ -55,3 +55,19 @@ BEGIN
 
     RAISE NOTICE 'Результат: %', var_result;
 END $$;
+
+-- Функция для расчета средних метео-значений
+CREATE OR REPLACE FUNCTION calculate_meteo_average() RETURNS TABLE (
+    avg_temperature NUMERIC(8,2),
+    avg_pressure NUMERIC(8,2),
+    avg_wind_direction NUMERIC(8,2)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        AVG(temperature) AS avg_temperature,
+        AVG(pressure) AS avg_pressure,
+        AVG(wind_direction) AS avg_wind_direction
+    FROM measurment_input_params;
+END;
+$$ LANGUAGE plpgsql;

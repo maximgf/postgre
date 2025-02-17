@@ -1,4 +1,4 @@
--- functions.sql
+-- user-data.sql
 -- Создание пользовательского типа данных
 CREATE TYPE measurement_input AS (
     temperature NUMERIC(8,2),

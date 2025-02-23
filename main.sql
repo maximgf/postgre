@@ -760,3 +760,176 @@ begin
 	raise notice 'Набор тестовых данных сформирован успешно';
 	
 end $$;
+
+-- Таблица для расчета среднего
+CREATE TABLE average_deviations_temperatur (
+    height INT PRIMARY KEY, -- Высота
+    negative_values NUMERIC[], -- Массив для отрицательных значений
+    positive_values NUMERIC[]  -- Массив для положительных значений
+);
+
+-- Вставка данных
+INSERT INTO average_deviations_temperatur (height, negative_values, positive_values)
+VALUES 
+(
+    200,
+    ARRAY[-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -20, -30, -40, -50],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    400,
+    ARRAY[-1, -2, -3, -4, -5, -6, -6, -7, -8, -9, -19, -29, -38, -48],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    800,
+    ARRAY[-1, -2, -3, -4, -5, -6, -6, -7, -7, -8, -18, -28, -37, -46],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    1200,
+    ARRAY[-1, -2, -3, -4, -4, -5, -5, -6, -7, -8, -17, -26, -35, -44],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    1600,
+    ARRAY[-1, -2, -3, -3, -4, -4, -5, -6, -7, -7, -17, -25, -34, -42],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    2000,
+    ARRAY[-1, -2, -3, -3, -4, -4, -5, -6, -6, -7, -16, -24, -32, -40],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    2400,
+    ARRAY[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    3000,
+    ARRAY[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    4000,
+    ARRAY[-1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+);
+
+-- Функция для расчета среднего отклонения
+CREATE OR REPLACE FUNCTION calculate_average_deviation(temperature NUMERIC)
+RETURNS TABLE(height INT, deviation NUMERIC) AS $$
+DECLARE
+    t0 NUMERIC;
+    delta_t NUMERIC;
+    deviation_value NUMERIC;
+    deviation_ten NUMERIC;
+    deviation_unit NUMERIC;
+    row_data RECORD;
+BEGIN
+    -- Шаг 1: Расчет T0
+    t0 := temperature + 0.3; -- Прибавляем ΔТ_V = 0.3
+
+    -- Шаг 2: Расчет ΔT0^мп
+    delta_t := t0 - 15.9;
+    delta_t := ROUND(delta_t); -- Округляем до целого числа
+
+    -- Шаг 3: Расчет отклонений для каждой стандартной высоты
+    FOR row_data IN SELECT * FROM average_deviations_temperatur LOOP
+        -- Разделяем отклонение на десятки и единицы
+        deviation_ten := (ABS(delta_t) / 10) * 10;
+        deviation_unit := ABS(delta_t) % 10;
+
+        -- Определяем знак отклонения
+        IF delta_t < 0 THEN
+            -- Для отрицательных значений используем negative_values
+            deviation_value := row_data.negative_values[deviation_ten / 10 + 1] + 
+                               row_data.negative_values[deviation_unit + 1];
+        ELSE
+            -- Для положительных значений используем positive_values
+            deviation_value := row_data.positive_values[deviation_ten / 10 + 1] + 
+                               row_data.positive_values[deviation_unit + 1];
+        END IF;
+
+        -- Возвращаем результат для текущей высоты
+        height := row_data.height;
+        deviation := deviation_value;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Примеры использования функции
+DO $$
+DECLARE
+    temp_value NUMERIC;
+    result_height INT;
+    result_deviation NUMERIC;
+BEGIN
+    -- Пример 1: Проверка для температуры 20 градусов
+    temp_value := 20;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 2: Проверка для температуры -10 градусов
+    temp_value := -10;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 3: Проверка для температуры 0 градусов
+    temp_value := 0;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 4: Проверка для температуры 30 градусов
+    temp_value := 30;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+END $$;
+
+DO $$
+SELECT 
+    e.name AS "ФИО",
+    mr.description AS "Должность",
+    COUNT(mb.id) AS "Кол-во измерений",
+    SUM(CASE 
+        WHEN mip.temperature < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_temperature') OR
+             mip.temperature > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_temperature') OR
+             mip.pressure < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_pressure') OR
+             mip.pressure > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_pressure') OR
+             mip.height < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_height') OR
+             mip.height > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_height') OR
+             mip.wind_direction < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_wind_direction') OR
+             mip.wind_direction > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_wind_direction')
+        THEN 1 ELSE 0 END) AS "Количество ошибочных данных"
+FROM 
+    employees e
+JOIN 
+    military_ranks mr ON e.military_rank_id = mr.id
+JOIN 
+    measurment_baths mb ON e.id = mb.emploee_id
+JOIN 
+    measurment_input_params mip ON mb.measurment_input_param_id = mip.id
+GROUP BY 
+    e.name, mr.description
+ORDER BY 
+    "Количество ошибочных данных" DESC;
+
+END $$;

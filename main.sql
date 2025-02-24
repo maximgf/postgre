@@ -760,3 +760,235 @@ begin
 	raise notice 'Набор тестовых данных сформирован успешно';
 	
 end $$;
+
+-- Таблица для расчета среднего
+CREATE TABLE average_deviations_temperatur (
+    height INT PRIMARY KEY, -- Высота
+    negative_values NUMERIC[], -- Массив для отрицательных значений
+    positive_values NUMERIC[]  -- Массив для положительных значений
+);
+
+-- Вставка данных
+INSERT INTO average_deviations_temperatur (height, negative_values, positive_values)
+VALUES 
+(
+    200,
+    ARRAY[-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -20, -30, -40, -50],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    400,
+    ARRAY[-1, -2, -3, -4, -5, -6, -6, -7, -8, -9, -19, -29, -38, -48],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    800,
+    ARRAY[-1, -2, -3, -4, -5, -6, -6, -7, -7, -8, -18, -28, -37, -46],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    1200,
+    ARRAY[-1, -2, -3, -4, -4, -5, -5, -6, -7, -8, -17, -26, -35, -44],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    1600,
+    ARRAY[-1, -2, -3, -3, -4, -4, -5, -6, -7, -7, -17, -25, -34, -42],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    2000,
+    ARRAY[-1, -2, -3, -3, -4, -4, -5, -6, -6, -7, -16, -24, -32, -40],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    2400,
+    ARRAY[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    3000,
+    ARRAY[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+),
+(
+    4000,
+    ARRAY[-1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34],
+    ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
+);
+
+INSERT INTO measurment_settings (key, value, description) VALUES
+('ground_temperature_deviation', '15.9', 'Отклонение приземной виртуальной температуры'),
+('delta_tv', '0.3', 'Измеренная приземная температура воздуха');
+
+-- Функция для расчета среднего отклонения
+CREATE OR REPLACE FUNCTION calculate_average_deviation(temperature NUMERIC)
+RETURNS TABLE(height INT, deviation NUMERIC) AS $$
+DECLARE
+    t0 NUMERIC;
+    delta_t NUMERIC;
+    deviation_value NUMERIC;
+    deviation_ten NUMERIC;
+    deviation_unit NUMERIC;
+    row_data RECORD;
+    ground_temp_deviation NUMERIC;
+    delta_tv NUMERIC;
+BEGIN
+    -- Извлекаем константы из таблицы measurment_settings
+    SELECT value::NUMERIC INTO ground_temp_deviation
+    FROM measurment_settings
+    WHERE key = 'ground_temperature_deviation';
+
+    SELECT value::NUMERIC INTO delta_tv
+    FROM measurment_settings
+    WHERE key = 'delta_tv';
+
+    -- Шаг 1: Расчет T0
+    t0 := temperature + delta_tv; -- Прибавляем ΔТ_V = 0.3
+
+    -- Шаг 2: Расчет ΔT0^мп
+    delta_t := t0 - ground_temp_deviation;
+    delta_t := ROUND(delta_t); -- Округляем до целого числа
+
+    -- Шаг 3: Расчет отклонений для каждой стандартной высоты
+    FOR row_data IN SELECT * FROM average_deviations_temperatur LOOP
+        -- Разделяем отклонение на десятки и единицы
+        deviation_ten := (ABS(delta_t) / 10) * 10;
+        deviation_unit := ABS(delta_t) % 10;
+
+        -- Определяем знак отклонения
+        IF delta_t < 0 THEN
+            -- Для отрицательных значений используем negative_values
+            deviation_value := row_data.negative_values[deviation_ten / 10 + 1] + 
+                               row_data.negative_values[deviation_unit + 1];
+        ELSE
+            -- Для положительных значений используем positive_values
+            deviation_value := row_data.positive_values[deviation_ten / 10 + 1] + 
+                               row_data.positive_values[deviation_unit + 1];
+        END IF;
+
+        -- Возвращаем результат для текущей высоты
+        height := row_data.height;
+        deviation := deviation_value;
+        RETURN NEXT;
+    END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Примеры использования функции
+DO $$
+DECLARE
+    temp_value NUMERIC;
+    result_height INT;
+    result_deviation NUMERIC;
+BEGIN
+    -- Пример 1: Проверка для температуры 20 градусов
+    temp_value := 20;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 2: Проверка для температуры -10 градусов
+    temp_value := -10;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 3: Проверка для температуры 0 градусов
+    temp_value := 0;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+
+    -- Пример 4: Проверка для температуры 30 градусов
+    temp_value := 30;
+    RAISE NOTICE 'Проверка для температуры: %', temp_value;
+    FOR result_height, result_deviation IN 
+        SELECT * FROM calculate_average_deviation(temp_value)
+    LOOP
+        RAISE NOTICE 'Высота: %, Отклонение: %', result_height, result_deviation;
+    END LOOP;
+END $$;
+
+-- Функция для проверки корректности параметров измерений
+CREATE OR REPLACE FUNCTION check_measurement_validity(
+    p_temperature numeric,
+    p_pressure numeric,
+    p_height numeric,
+    p_wind_direction numeric
+) RETURNS boolean AS $$
+DECLARE
+    v_min_temperature numeric;
+    v_max_temperature numeric;
+    v_min_pressure numeric;
+    v_max_pressure numeric;
+    v_min_height numeric;
+    v_max_height numeric;
+    v_min_wind_direction numeric;
+    v_max_wind_direction numeric;
+BEGIN
+    -- Получаем граничные значения из настроек
+    SELECT value::numeric INTO v_min_temperature FROM measurment_settings WHERE key = 'min_temperature';
+    SELECT value::numeric INTO v_max_temperature FROM measurment_settings WHERE key = 'max_temperature';
+    SELECT value::numeric INTO v_min_pressure FROM measurment_settings WHERE key = 'min_pressure';
+    SELECT value::numeric INTO v_max_pressure FROM measurment_settings WHERE key = 'max_pressure';
+    SELECT value::numeric INTO v_min_height FROM measurment_settings WHERE key = 'min_height';
+    SELECT value::numeric INTO v_max_height FROM measurment_settings WHERE key = 'max_height';
+    SELECT value::numeric INTO v_min_wind_direction FROM measurment_settings WHERE key = 'min_wind_direction';
+    SELECT value::numeric INTO v_max_wind_direction FROM measurment_settings WHERE key = 'max_wind_direction';
+
+    -- Проверяем все параметры
+    RETURN (
+        p_temperature BETWEEN v_min_temperature AND v_max_temperature AND
+        p_pressure BETWEEN v_min_pressure AND v_max_pressure AND
+        p_height BETWEEN v_min_height AND v_max_height AND
+        p_wind_direction BETWEEN v_min_wind_direction AND v_max_wind_direction
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- Основной запрос с использованием CTE
+WITH measurement_stats AS (
+    SELECT 
+        e.id,
+        e.name,
+        mr.description AS rank_description,
+        COUNT(mb.id) AS total_measurements,
+        SUM(CASE 
+            WHEN NOT check_measurement_validity(
+                mip.temperature, 
+                mip.pressure, 
+                mip.height, 
+                mip.wind_direction
+            ) THEN 1 
+            ELSE 0 
+        END) AS error_count
+    FROM 
+        employees e
+    JOIN 
+        military_ranks mr ON e.military_rank_id = mr.id
+    JOIN 
+        measurment_baths mb ON e.id = mb.emploee_id
+    JOIN 
+        measurment_input_params mip ON mb.measurment_input_param_id = mip.id
+    GROUP BY 
+        e.id, e.name, mr.description
+)
+SELECT 
+    name AS "ФИО",
+    rank_description AS "Должность",
+    total_measurements AS "Кол-во измерений",
+    error_count AS "Количество ошибочных данных"
+FROM 
+    measurement_stats
+ORDER BY 
+    error_count DESC;

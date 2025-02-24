@@ -817,6 +817,10 @@ VALUES
     ARRAY[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, NULL, NULL]
 );
 
+INSERT INTO measurment_settings (key, value, description) VALUES
+('ground_temperature_deviation', '15.9', 'Отклонение приземной виртуальной температуры'),
+('delta_tv', '0.3', 'Измеренная приземная температура воздуха');
+
 -- Функция для расчета среднего отклонения
 CREATE OR REPLACE FUNCTION calculate_average_deviation(temperature NUMERIC)
 RETURNS TABLE(height INT, deviation NUMERIC) AS $$
@@ -827,12 +831,23 @@ DECLARE
     deviation_ten NUMERIC;
     deviation_unit NUMERIC;
     row_data RECORD;
+    ground_temp_deviation NUMERIC;
+    delta_tv NUMERIC;
 BEGIN
+    -- Извлекаем константы из таблицы measurment_settings
+    SELECT value::NUMERIC INTO ground_temp_deviation
+    FROM measurment_settings
+    WHERE key = 'ground_temperature_deviation';
+
+    SELECT value::NUMERIC INTO delta_tv
+    FROM measurment_settings
+    WHERE key = 'delta_tv';
+
     -- Шаг 1: Расчет T0
-    t0 := temperature + 0.3; -- Прибавляем ΔТ_V = 0.3
+    t0 := temperature + delta_tv; -- Прибавляем ΔТ_V = 0.3
 
     -- Шаг 2: Расчет ΔT0^мп
-    delta_t := t0 - 15.9;
+    delta_t := t0 - ground_temp_deviation;
     delta_t := ROUND(delta_t); -- Округляем до целого числа
 
     -- Шаг 3: Расчет отклонений для каждой стандартной высоты
@@ -904,32 +919,76 @@ BEGIN
     END LOOP;
 END $$;
 
-DO $$
-SELECT 
-    e.name AS "ФИО",
-    mr.description AS "Должность",
-    COUNT(mb.id) AS "Кол-во измерений",
-    SUM(CASE 
-        WHEN mip.temperature < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_temperature') OR
-             mip.temperature > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_temperature') OR
-             mip.pressure < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_pressure') OR
-             mip.pressure > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_pressure') OR
-             mip.height < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_height') OR
-             mip.height > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_height') OR
-             mip.wind_direction < (SELECT value::numeric FROM measurment_settings WHERE key = 'min_wind_direction') OR
-             mip.wind_direction > (SELECT value::numeric FROM measurment_settings WHERE key = 'max_wind_direction')
-        THEN 1 ELSE 0 END) AS "Количество ошибочных данных"
-FROM 
-    employees e
-JOIN 
-    military_ranks mr ON e.military_rank_id = mr.id
-JOIN 
-    measurment_baths mb ON e.id = mb.emploee_id
-JOIN 
-    measurment_input_params mip ON mb.measurment_input_param_id = mip.id
-GROUP BY 
-    e.name, mr.description
-ORDER BY 
-    "Количество ошибочных данных" DESC;
+-- Функция для проверки корректности параметров измерений
+CREATE OR REPLACE FUNCTION check_measurement_validity(
+    p_temperature numeric,
+    p_pressure numeric,
+    p_height numeric,
+    p_wind_direction numeric
+) RETURNS boolean AS $$
+DECLARE
+    v_min_temperature numeric;
+    v_max_temperature numeric;
+    v_min_pressure numeric;
+    v_max_pressure numeric;
+    v_min_height numeric;
+    v_max_height numeric;
+    v_min_wind_direction numeric;
+    v_max_wind_direction numeric;
+BEGIN
+    -- Получаем граничные значения из настроек
+    SELECT value::numeric INTO v_min_temperature FROM measurment_settings WHERE key = 'min_temperature';
+    SELECT value::numeric INTO v_max_temperature FROM measurment_settings WHERE key = 'max_temperature';
+    SELECT value::numeric INTO v_min_pressure FROM measurment_settings WHERE key = 'min_pressure';
+    SELECT value::numeric INTO v_max_pressure FROM measurment_settings WHERE key = 'max_pressure';
+    SELECT value::numeric INTO v_min_height FROM measurment_settings WHERE key = 'min_height';
+    SELECT value::numeric INTO v_max_height FROM measurment_settings WHERE key = 'max_height';
+    SELECT value::numeric INTO v_min_wind_direction FROM measurment_settings WHERE key = 'min_wind_direction';
+    SELECT value::numeric INTO v_max_wind_direction FROM measurment_settings WHERE key = 'max_wind_direction';
 
-END $$;
+    -- Проверяем все параметры
+    RETURN (
+        p_temperature BETWEEN v_min_temperature AND v_max_temperature AND
+        p_pressure BETWEEN v_min_pressure AND v_max_pressure AND
+        p_height BETWEEN v_min_height AND v_max_height AND
+        p_wind_direction BETWEEN v_min_wind_direction AND v_max_wind_direction
+    );
+END;
+$$ LANGUAGE plpgsql;
+
+-- Основной запрос с использованием CTE
+WITH measurement_stats AS (
+    SELECT 
+        e.id,
+        e.name,
+        mr.description AS rank_description,
+        COUNT(mb.id) AS total_measurements,
+        SUM(CASE 
+            WHEN NOT check_measurement_validity(
+                mip.temperature, 
+                mip.pressure, 
+                mip.height, 
+                mip.wind_direction
+            ) THEN 1 
+            ELSE 0 
+        END) AS error_count
+    FROM 
+        employees e
+    JOIN 
+        military_ranks mr ON e.military_rank_id = mr.id
+    JOIN 
+        measurment_baths mb ON e.id = mb.emploee_id
+    JOIN 
+        measurment_input_params mip ON mb.measurment_input_param_id = mip.id
+    GROUP BY 
+        e.id, e.name, mr.description
+)
+SELECT 
+    name AS "ФИО",
+    rank_description AS "Должность",
+    total_measurements AS "Кол-во измерений",
+    error_count AS "Количество ошибочных данных"
+FROM 
+    measurement_stats
+ORDER BY 
+    error_count DESC;

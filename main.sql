@@ -1035,41 +1035,372 @@ end $$;
 */
 
 
-select
-	user_name, position, quantity, quantity_fails
-from
+CREATE OR REPLACE VIEW employee_measurement_stats AS
+WITH measurement_counts AS (
+    -- CTE для подсчета общего количества измерений
+    SELECT 
+        COUNT(*) AS quantity, 
+        emploee_id 
+    FROM public.measurment_input_params AS t1
+    INNER JOIN public.measurment_baths AS t2 ON t2.measurment_input_param_id = t1.id
+    GROUP BY emploee_id
+),
+fail_counts AS (
+    -- CTE для подсчета количества ошибочных данных
+    SELECT 
+        COUNT(*) AS quantity_fails,
+        emploee_id 
+    FROM public.measurment_input_params AS t1
+    INNER JOIN public.measurment_baths AS t2 ON t2.measurment_input_param_id = t1.id
+    WHERE (public.fn_check_input_params(height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range)::public.check_result).is_check = False
+    GROUP BY emploee_id
+)
+-- Основной запрос, использующий CTE
+SELECT
+    t1.name AS user_name,
+    t2.description AS position,
+    COALESCE(mc.quantity, 0) AS quantity,
+    COALESCE(fc.quantity_fails, 0) AS quantity_fails
+FROM public.employees AS t1
+INNER JOIN public.military_ranks AS t2 ON t1.military_rank_id = t2.id
+LEFT JOIN measurement_counts AS mc ON mc.emploee_id = t1.id
+LEFT JOIN fail_counts AS fc ON fc.emploee_id = t1.id
+ORDER BY fc.quantity_fails DESC;
+
+CREATE TABLE calculation_logs (
+    id SERIAL PRIMARY KEY,
+    input_params JSONB NOT NULL,  -- Входные параметры расчета
+    input_params_hash VARCHAR(32) NOT NULL,  -- Хэш входных параметров
+    used_table_values JSONB,      -- Использованные значения из таблиц с корректировкой
+    intermediate_results JSONB,   -- Промежуточные результаты
+    calculation_result JSONB,     -- Итоговый результат расчета
+    calculation_timestamp TIMESTAMP DEFAULT NOW()  -- Время выполнения расчета
+);
+
+CREATE UNIQUE INDEX idx_calculation_logs_input_params_hash ON calculation_logs (input_params_hash);
+
+CREATE OR REPLACE FUNCTION log_calculation(input_params JSONB, used_table_values JSONB, intermediate_results JSONB, calculation_result JSONB) RETURNS VOID AS $$
+DECLARE
+    input_params_hash TEXT;
+BEGIN
+    -- Генерация хэша входных параметров
+    input_params_hash := md5(input_params::text);
+
+    -- Проверка, был ли уже выполнен расчет с такими параметрами
+    IF EXISTS (SELECT 1 FROM calculation_logs WHERE input_params_hash = input_params_hash) THEN
+        RAISE NOTICE 'Расчет с такими входными параметрами уже был выполнен';
+    ELSE
+        -- Логирование нового расчета
+        INSERT INTO calculation_logs (input_params, input_params_hash, used_table_values, intermediate_results, calculation_result)
+        VALUES (input_params, input_params_hash, used_table_values, intermediate_results, calculation_result);
+
+        RAISE NOTICE 'Расчет успешно залогирован';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+--Таблица 3
+-- Создаем таблицу speed_of_average_wind с внешним ключом на calc_height_correction.id
+CREATE TABLE speed_of_average_wind
 (
-	select 
-			-- ФИО  | Должность
-			t1.id , t1.name as user_name, t2.description as position,
-			coalesce(tt1.quantity, 0 ) as quantity,
-			coalesce(tt2.quantity_fails, 0) as quantity_fails
-			from public.employees as t1
-	inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
-	left join
-	(
-		--  Кол-во измерений
-		select count(*) as quantity,  emploee_id 
-		from public.measurment_input_params as t1
-		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
-		group by emploee_id
-	) as tt1 on tt1.emploee_id = t1.id
-	left join
-	(
-		-- Количество ошибочных данных
-		select 
-			count(*) as quantity_fails,
-			emploee_id 
-		from public.measurment_input_params as t1
-		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
-		where
-			(public.fn_check_input_params(height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range)::public.check_result).is_check = False
-		group by emploee_id
-	) as tt2 on tt2.emploee_id = t1.id
-) as tt
-order by tt.quantity_fails desc
+    height_id INTEGER PRIMARY KEY REFERENCES calc_height_correction(id), -- Внешний ключ на calc_height_correction
+    distance NUMERIC[], -- Массив для отрицательных значений
+    degree INTEGER
+);
+
+-- Вставляем данные в таблицу speed_of_average_wind, используя id из calc_height_correction
+INSERT INTO speed_of_average_wind (height_id, distance, degree)
+VALUES
+    ((SELECT id FROM calc_height_correction WHERE height = 200), ARRAY[3,4,5,6,7,7,8,9,10,11,12,12], 0),
+    ((SELECT id FROM calc_height_correction WHERE height = 400), ARRAY[4,5,6,7,8,9,10,11,12,13,14,15], 1),
+    ((SELECT id FROM calc_height_correction WHERE height = 800), ARRAY[4,5,6,7,8,9,10,11,13,14,15,16], 2),
+    ((SELECT id FROM calc_height_correction WHERE height = 1200), ARRAY[4,5,6,7,8,9,10,11,12,13,14,15,16], 2),
+    ((SELECT id FROM calc_height_correction WHERE height = 1600), ARRAY[4,6,7,8,9,10,11,13,14,15,17,17], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 2000), ARRAY[4,6,7,8,9,10,11,13,14,16,17,18], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 2400), ARRAY[4,6,8,9,9,10,12,14,15,16,18,19], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 3000), ARRAY[5,6,8,9,10,11,12,14,15,17,18,19], 4),
+    ((SELECT id FROM calc_height_correction WHERE height = 4000), ARRAY[5,6,8,9,10,11,12,14,16,18,19,20], 4);
 
 
+CREATE OR REPLACE FUNCTION calculate_average_wind_speed(
+    par_height NUMERIC,
+    par_bullet_demolition_range NUMERIC
+) RETURNS NUMERIC AS $$
+DECLARE
+    var_speed NUMERIC := 0;
+    var_distance_index INT;
+    var_distance_values NUMERIC[];
+BEGIN
+    -- Если дальность сноса меньше 40 метров, скорость ветра равна 0
+    IF par_bullet_demolition_range < 40 THEN
+        RETURN 0;
+    END IF;
+
+    -- Получаем данные из таблицы для заданной высоты
+    SELECT distance
+    INTO var_distance_values
+    FROM speed_of_average_wind
+    WHERE height = par_height;
+
+    -- Если данные для высоты не найдены, возвращаем 0
+    IF var_distance_values IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- Вычисляем индекс на основе дальности сноса
+    var_distance_index := LEAST(GREATEST((par_bullet_demolition_range - 40) / 10, 0), array_length(var_distance_values, 1) - 1);
+
+    -- Получаем скорость ветра по индексу
+    var_speed := var_distance_values[var_distance_index + 1]; -- Индексы в массиве начинаются с 1
+
+    RETURN var_speed;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION calculate_average_wind_direction(
+    par_height NUMERIC,
+    par_ground_wind_direction NUMERIC
+) RETURNS NUMERIC AS $$
+DECLARE
+    var_direction_increment NUMERIC;
+BEGIN
+    -- Получаем приращение направления ветра из таблицы
+    SELECT degree
+    INTO var_direction_increment
+    FROM speed_of_average_wind
+    WHERE height = par_height;
+
+    -- Если данные для высоты не найдены, возвращаем направление приземного ветра
+    IF var_direction_increment IS NULL THEN
+        RETURN par_ground_wind_direction;
+    END IF;
+
+    -- Рассчитываем среднее направление ветра
+    RETURN par_ground_wind_direction + var_direction_increment;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION calculate_wind_gun_corrections(
+    IN par_height NUMERIC,
+    IN par_temperature NUMERIC,
+    IN par_pressure NUMERIC,
+    IN par_wind_direction NUMERIC,
+    IN par_wind_speed NUMERIC,
+    IN par_bullet_demolition_range NUMERIC,
+    OUT deviation_pressure NUMERIC,
+    OUT deviation_temperature NUMERIC,
+    OUT average_wind_speed NUMERIC,
+    OUT average_wind_direction NUMERIC
+) AS $$
+BEGIN
+    -- Отклонение наземного давления
+    deviation_pressure := public.fn_calc_header_pressure(par_pressure);
+
+    -- Отклонение приземной виртуальной температуры
+    deviation_temperature := public.fn_calc_header_temperature(par_temperature);
+
+    -- Средняя скорость ветра
+    average_wind_speed := calculate_average_wind_speed(par_height, par_bullet_demolition_range);
+
+    -- Среднее направление ветра
+    average_wind_direction := calculate_average_wind_direction(par_height, par_wind_direction);
+END;
+$$ LANGUAGE plpgsql;
 
 
+DO $$
+DECLARE
+    -- Входные параметры
+    var_height NUMERIC := 200; -- Высота (в метрах)
+    var_temperature NUMERIC := 10; -- Температура (в градусах Цельсия)
+    var_pressure NUMERIC := 740; -- Давление (в мм рт. ст.)
+    var_wind_direction NUMERIC := 30; -- Направление приземного ветра (в градусах)
+    var_wind_speed NUMERIC := 5; -- Скорость приземного ветра (в м/с)
+    var_bullet_demolition_range NUMERIC := 80; -- Дальность сноса ветровых пуль (в метрах)
 
+    -- Выходные параметры
+    var_deviation_pressure NUMERIC; -- Отклонение наземного давления
+    var_deviation_temperature NUMERIC; -- Отклонение приземной виртуальной температуры
+    var_average_wind_speed NUMERIC; -- Средняя скорость ветра
+    var_average_wind_direction NUMERIC; -- Среднее направление ветра
+BEGIN
+    -- Вызов основной функции расчета
+    SELECT * INTO var_deviation_pressure, var_deviation_temperature, var_average_wind_speed, var_average_wind_direction
+    FROM calculate_wind_gun_corrections(
+        var_height,
+        var_temperature,
+        var_pressure,
+        var_wind_direction,
+        var_wind_speed,
+        var_bullet_demolition_range
+    );
+
+    -- Вывод результатов
+    RAISE NOTICE '==============================';
+    RAISE NOTICE 'Результаты расчета:';
+    RAISE NOTICE 'Отклонение наземного давления: % мм рт. ст.', var_deviation_pressure;
+    RAISE NOTICE 'Отклонение приземной виртуальной температуры: % °C', var_deviation_temperature;
+    RAISE NOTICE 'Средняя скорость ветра: % м/с', var_average_wind_speed;
+    RAISE NOTICE 'Среднее направление ветра: % градусов', var_average_wind_direction;
+    RAISE NOTICE '==============================';
+END $$;
+
+
+-- Индексы для таблицы military_ranks
+CREATE INDEX idx_military_ranks_id ON public.military_ranks (id);
+
+-- Индексы для таблицы employees
+CREATE INDEX idx_employees_id ON public.employees (id);
+CREATE INDEX idx_employees_military_rank_id ON public.employees (military_rank_id);
+
+-- Индексы для таблицы measurment_types
+CREATE INDEX idx_measurment_types_id ON public.measurment_types (id);
+
+-- Индексы для таблицы measurment_input_params
+CREATE INDEX idx_measurment_input_params_id ON public.measurment_input_params (id);
+CREATE INDEX idx_measurment_input_params_measurment_type_id ON public.measurment_input_params (measurment_type_id);
+
+-- Индексы для таблицы measurment_baths
+CREATE INDEX idx_measurment_baths_id ON public.measurment_baths (id);
+CREATE INDEX idx_measurment_baths_emploee_id ON public.measurment_baths (emploee_id);
+CREATE INDEX idx_measurment_baths_measurment_input_param_id ON public.measurment_baths (measurment_input_param_id);
+
+-- Индексы для таблицы measurment_settings
+CREATE INDEX idx_measurment_settings_key ON public.measurment_settings (key);
+
+-- Индексы для таблицы calc_height_correction
+CREATE INDEX idx_calc_height_correction_id ON public.calc_height_correction (id);
+CREATE INDEX idx_calc_height_correction_measurment_type_id ON public.calc_height_correction (measurment_type_id);
+
+-- Индексы для таблицы calc_temperature_height_correction
+CREATE INDEX idx_calc_temperature_height_correction_id ON public.calc_temperature_height_correction (id);
+CREATE INDEX idx_calc_temperature_height_correction_calc_height_id ON public.calc_temperature_height_correction (calc_height_id);
+CREATE INDEX idx_calc_temperature_height_correction_calc_temperature_header_id ON public.calc_temperature_height_correction (calc_temperature_header_id);
+
+-- Индексы для таблицы calc_header_correction
+CREATE INDEX idx_calc_header_correction_id ON public.calc_header_correction (id);
+CREATE INDEX idx_calc_header_correction_measurment_type_id ON public.calc_header_correction (measurment_type_id);
+
+-- Индексы для таблицы speed_of_average_wind
+CREATE INDEX idx_speed_of_average_wind_height ON public.speed_of_average_wind (height);
+
+
+CREATE OR REPLACE VIEW effective_measurement_height AS
+WITH measurement_stats AS (
+    -- CTE для подсчета общего количества измерений и количества ошибочных измерений
+    SELECT 
+        e.id AS employee_id,
+        e.name AS user_name,
+        mr.description AS rank,
+        COUNT(mb.id) AS total_measurements,
+        SUM(CASE WHEN (public.fn_check_input_params(mip.height, mip.temperature, mip.pressure, mip.wind_direction, mip.wind_speed, mip.bullet_demolition_range)).is_check = False THEN 1 ELSE 0 END) AS error_count
+    FROM 
+        public.employees e
+    INNER JOIN 
+        public.military_ranks mr ON e.military_rank_id = mr.id
+    INNER JOIN 
+        public.measurment_baths mb ON e.id = mb.emploee_id
+    INNER JOIN 
+        public.measurment_input_params mip ON mb.measurment_input_param_id = mip.id
+    GROUP BY 
+        e.id, e.name, mr.description
+)
+-- Основной запрос, использующий CTE
+SELECT 
+    ms.user_name AS "ФИО пользователя",
+    ms.rank AS "Звание",
+    MIN(mip.height) AS "Мин. высота метеопоста",
+    MAX(mip.height) AS "Макс. высота метеопоста",
+    ms.total_measurements AS "Всего измерений",
+    ms.error_count AS "Из них ошибочны"
+FROM 
+    measurement_stats ms
+INNER JOIN 
+    public.measurment_baths mb ON ms.employee_id = mb.emploee_id
+INNER JOIN 
+    public.measurment_input_params mip ON mb.measurment_input_param_id = mip.id
+WHERE 
+    ms.total_measurements >= 5 AND ms.error_count < 10
+GROUP BY 
+    ms.user_name, ms.rank, ms.total_measurements, ms.error_count
+ORDER BY 
+    ms.error_count;
+
+
+CREATE OR REPLACE VIEW most_common_measurement_errors AS
+WITH log_data_text AS (
+    -- Извлекаем данные из JSON-логов как текст
+    SELECT 
+        cl.id AS log_id,
+        cl.input_params->>'height' AS height_text,
+        cl.input_params->>'temperature' AS temperature_text,
+        cl.input_params->>'pressure' AS pressure_text,
+        cl.input_params->>'wind_direction' AS wind_direction_text,
+        cl.input_params->>'wind_speed' AS wind_speed_text,
+        cl.input_params->>'bullet_demolition_range' AS bullet_demolition_range_text,
+        cl.calculation_timestamp AS log_time
+    FROM 
+        calculation_logs cl
+),
+log_data AS (
+    -- Конвертируем текстовые данные в numeric с обработкой null
+    SELECT 
+        log_id,
+        coalesce(height_text, '0')::numeric AS height,
+        coalesce(temperature_text, '0')::numeric AS temperature,
+        coalesce(pressure_text, '0')::numeric AS pressure,
+        coalesce(wind_direction_text, '0')::numeric AS wind_direction,
+        coalesce(wind_speed_text, '0')::numeric AS wind_speed,
+        coalesce(bullet_demolition_range_text, '0')::numeric AS bullet_demolition_range,
+        log_time
+    FROM 
+        log_data_text
+),
+error_data AS (
+    -- Проверяем данные на ошибки
+    SELECT 
+        ld.*,
+        (public.fn_check_input_params(
+            ld.height, 
+            ld.temperature, 
+            ld.pressure, 
+            ld.wind_direction, 
+            ld.wind_speed, 
+            ld.bullet_demolition_range
+        )).error_message AS error_message
+    FROM 
+        log_data ld
+    WHERE 
+        (public.fn_check_input_params(
+            ld.height, 
+            ld.temperature, 
+            ld.pressure, 
+            ld.wind_direction, 
+            ld.wind_speed, 
+            ld.bullet_demolition_range
+        )).is_check = False
+),
+error_counts AS (
+    -- Группируем ошибки по типу и собираем пользователей
+    SELECT 
+        ed.error_message,
+        COUNT(*) AS error_count,
+        STRING_AGG(DISTINCT e.name, ', ') AS users_list
+    FROM 
+        error_data ed
+    INNER JOIN 
+        measurment_baths mb ON ed.log_id = mb.measurment_input_param_id
+    INNER JOIN 
+        employees e ON mb.emploee_id = e.id
+    GROUP BY 
+        ed.error_message
+)
+-- Основной запрос, формирующий отчет
+SELECT 
+    error_message AS "Наименование ошибки",
+    error_count AS "Количество ошибок",
+    users_list AS "Список пользователей, которые допустили ошибку"
+FROM 
+    error_counts
+ORDER BY 
+    error_count DESC;

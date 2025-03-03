@@ -1070,15 +1070,14 @@ ORDER BY fc.quantity_fails DESC;
 CREATE TABLE calculation_logs (
     id SERIAL PRIMARY KEY,
     input_params JSONB NOT NULL,  -- Входные параметры расчета
+    input_params_hash VARCHAR(32) NOT NULL,  -- Хэш входных параметров
     used_table_values JSONB,      -- Использованные значения из таблиц с корректировкой
     intermediate_results JSONB,   -- Промежуточные результаты
     calculation_result JSONB,     -- Итоговый результат расчета
     calculation_timestamp TIMESTAMP DEFAULT NOW()  -- Время выполнения расчета
 );
 
-CREATE TABLE processed_input_params (
-    input_params_hash TEXT PRIMARY KEY  -- Хэш входных параметров для быстрого поиска
-);
+CREATE UNIQUE INDEX idx_calculation_logs_input_params_hash ON calculation_logs (input_params_hash);
 
 CREATE OR REPLACE FUNCTION log_calculation(input_params JSONB, used_table_values JSONB, intermediate_results JSONB, calculation_result JSONB) RETURNS VOID AS $$
 DECLARE
@@ -1088,15 +1087,12 @@ BEGIN
     input_params_hash := md5(input_params::text);
 
     -- Проверка, был ли уже выполнен расчет с такими параметрами
-    IF EXISTS (SELECT 1 FROM processed_input_params WHERE input_params_hash = input_params_hash) THEN
+    IF EXISTS (SELECT 1 FROM calculation_logs WHERE input_params_hash = input_params_hash) THEN
         RAISE NOTICE 'Расчет с такими входными параметрами уже был выполнен';
     ELSE
         -- Логирование нового расчета
-        INSERT INTO calculation_logs (input_params, used_table_values, intermediate_results, calculation_result)
-        VALUES (input_params, used_table_values, intermediate_results, calculation_result);
-
-        -- Фиксация хэша входных параметров
-        INSERT INTO processed_input_params (input_params_hash) VALUES (input_params_hash);
+        INSERT INTO calculation_logs (input_params, input_params_hash, used_table_values, intermediate_results, calculation_result)
+        VALUES (input_params, input_params_hash, used_table_values, intermediate_results, calculation_result);
 
         RAISE NOTICE 'Расчет успешно залогирован';
     END IF;
@@ -1104,60 +1100,26 @@ END;
 $$ LANGUAGE plpgsql;
 
 --Таблица 3
-CREATE TABLE speed_of_average_wind (
-    height INT PRIMARY KEY, -- Высота
+-- Создаем таблицу speed_of_average_wind с внешним ключом на calc_height_correction.id
+CREATE TABLE speed_of_average_wind
+(
+    height_id INTEGER PRIMARY KEY REFERENCES calc_height_correction(id), -- Внешний ключ на calc_height_correction
     distance NUMERIC[], -- Массив для отрицательных значений
-	degree INT,
+    degree INTEGER
 );
 
--- Вставка данных
-INSERT INTO speed_of_average_wind (height, distance, degree)
-VALUES 
-(
-    200,
-    ARRAY[3,4,5,6,7,7,8,9,10,11,12,12],
-	0
-),
-(
-    400,
-    ARRAY[4,5,6,7,8,9,10,11,12,13,14,15],
-	1
-),
-(
-    800,
-    ARRAY[4,5,6,7,8,9,10,11,13,14,15,16],
-	2
-),
-(
-    1200,
-    ARRAY[4,5,6,7,8,9,10,11,12,13,14,15,16],
-	2
-),
-(
-    1600,
-    ARRAY[4,6,7,8,9,10,11,13,14,15,17,17],
-	3
-),
-(
-    2000,
-    ARRAY[4,6,7,8,9,10,11,13,14,16,17,18],
-	3
-),
-(
-    2400,
-    ARRAY[4,6,8,9,9,10,12,14,15,16,18,19],
-	3
-),
-(
-    3000,
-    ARRAY[5,6,8,9,10,11,12,14,15,17,18,19],
-	4
-),
-(
-    4000,
-    ARRAY[5,6,8,9,10,11,12,14,16,18,19,20],
-	4
-);
+-- Вставляем данные в таблицу speed_of_average_wind, используя id из calc_height_correction
+INSERT INTO speed_of_average_wind (height_id, distance, degree)
+VALUES
+    ((SELECT id FROM calc_height_correction WHERE height = 200), ARRAY[3,4,5,6,7,7,8,9,10,11,12,12], 0),
+    ((SELECT id FROM calc_height_correction WHERE height = 400), ARRAY[4,5,6,7,8,9,10,11,12,13,14,15], 1),
+    ((SELECT id FROM calc_height_correction WHERE height = 800), ARRAY[4,5,6,7,8,9,10,11,13,14,15,16], 2),
+    ((SELECT id FROM calc_height_correction WHERE height = 1200), ARRAY[4,5,6,7,8,9,10,11,12,13,14,15,16], 2),
+    ((SELECT id FROM calc_height_correction WHERE height = 1600), ARRAY[4,6,7,8,9,10,11,13,14,15,17,17], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 2000), ARRAY[4,6,7,8,9,10,11,13,14,16,17,18], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 2400), ARRAY[4,6,8,9,9,10,12,14,15,16,18,19], 3),
+    ((SELECT id FROM calc_height_correction WHERE height = 3000), ARRAY[5,6,8,9,10,11,12,14,15,17,18,19], 4),
+    ((SELECT id FROM calc_height_correction WHERE height = 4000), ARRAY[5,6,8,9,10,11,12,14,16,18,19,20], 4);
 
 
 CREATE OR REPLACE FUNCTION calculate_average_wind_speed(
@@ -1366,19 +1328,33 @@ ORDER BY
 
 
 CREATE OR REPLACE VIEW most_common_measurement_errors AS
-WITH log_data AS (
-    -- Извлекаем данные из JSON-логов
+WITH log_data_text AS (
+    -- Извлекаем данные из JSON-логов как текст
     SELECT 
         cl.id AS log_id,
-        (cl.input_params->>'height')::numeric AS height,
-        (cl.input_params->>'temperature')::numeric AS temperature,
-        (cl.input_params->>'pressure')::numeric AS pressure,
-        (cl.input_params->>'wind_direction')::numeric AS wind_direction,
-        (cl.input_params->>'wind_speed')::numeric AS wind_speed,
-        (cl.input_params->>'bullet_demolition_range')::numeric AS bullet_demolition_range,
+        cl.input_params->>'height' AS height_text,
+        cl.input_params->>'temperature' AS temperature_text,
+        cl.input_params->>'pressure' AS pressure_text,
+        cl.input_params->>'wind_direction' AS wind_direction_text,
+        cl.input_params->>'wind_speed' AS wind_speed_text,
+        cl.input_params->>'bullet_demolition_range' AS bullet_demolition_range_text,
         cl.calculation_timestamp AS log_time
     FROM 
         calculation_logs cl
+),
+log_data AS (
+    -- Конвертируем текстовые данные в numeric с обработкой null
+    SELECT 
+        log_id,
+        coalesce(height_text, '0')::numeric AS height,
+        coalesce(temperature_text, '0')::numeric AS temperature,
+        coalesce(pressure_text, '0')::numeric AS pressure,
+        coalesce(wind_direction_text, '0')::numeric AS wind_direction,
+        coalesce(wind_speed_text, '0')::numeric AS wind_speed,
+        coalesce(bullet_demolition_range_text, '0')::numeric AS bullet_demolition_range,
+        log_time
+    FROM 
+        log_data_text
 ),
 error_data AS (
     -- Проверяем данные на ошибки

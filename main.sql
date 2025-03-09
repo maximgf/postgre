@@ -1564,5 +1564,242 @@ BEGIN
 END $$;
 
 
+-- Расчет среднего отклонения температуры воздуха для ДМК
+CREATE OR REPLACE PROCEDURE public.calculate_temperature_deviation_dmk(
+    IN par_measurement_type_id INTEGER,
+    IN par_temperature NUMERIC(8,2),
+    INOUT par_corrections public.temperature_correction[]
+)
+LANGUAGE 'plpgsql'
+AS $BODY$
+DECLARE
+    var_row RECORD;
+    var_index INTEGER;
+    var_header_correction INTEGER[];
+    var_right_index INTEGER;
+    var_left_index INTEGER;
+    var_header_index INTEGER;
+    var_deviation INTEGER;
+    var_table INTEGER[];
+    var_correction public.temperature_correction;
+    var_table_row TEXT;
+BEGIN
+    -- Проверяем наличие данных в таблице
+    IF NOT EXISTS (
+        SELECT 1
+        FROM public.calc_height_correction AS t1
+        INNER JOIN public.calc_temperature_height_correction AS t2 
+        ON t2.calc_height_id = t1.id
+        WHERE t1.measurment_type_id = par_measurement_type_id
+    ) THEN
+        RAISE EXCEPTION 'Для расчета поправок к температуре не хватает данных!';
+    END IF;
 
+    RAISE NOTICE '| Высота   | Поправка  |';
+    RAISE NOTICE '|----------|-----------|';
+
+    FOR var_row IN
+        SELECT t2.*, t1.height 
+        FROM public.calc_height_correction AS t1
+        INNER JOIN public.calc_temperature_height_correction AS t2 
+        ON t2.calc_height_id = t1.id
+        WHERE t1.measurment_type_id = par_measurement_type_id
+    LOOP
+        -- Получаем индекс корректировки
+        var_index := par_temperature::INTEGER;
+        -- Получаем заголовок 
+        var_header_correction := (SELECT values FROM public.calc_header_correction
+            WHERE id = var_row.calc_temperature_header_id AND header = 'table2');
+
+        -- Проверяем данные
+        IF array_length(var_header_correction, 1) = 0 THEN
+            RAISE EXCEPTION 'Невозможно произвести расчет по высоте % Некорректные исходные данные или настройки', var_row.height;
+        END IF;
+
+        IF array_length(var_header_correction, 1) < var_index THEN
+            RAISE EXCEPTION 'Невозможно произвести расчет по высоте % Некорректные исходные данные или настройки', var_row.height;
+        END IF;
+
+        -- Получаем левый и правый индекс
+        var_right_index := abs(var_index % 10);
+        var_header_index := abs(var_index) - var_right_index;
+
+        -- Определяем корректировки
+        IF par_temperature >= 0 THEN
+            var_table := var_row.positive_values;
+        ELSE
+            var_table := var_row.negative_values;
+        END IF;
+
+        IF var_header_index = 0 THEN
+            var_header_index := 1;
+        END IF;
+
+        var_left_index := var_header_correction[var_header_index];
+        IF var_left_index = 0 THEN
+            var_left_index := 1;
+        END IF;
+
+        -- Поправка на высоту
+        var_deviation := var_table[var_left_index] + var_table[var_right_index];
+
+        SELECT '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11, ' ') || '|'
+        INTO var_table_row;
+
+        RAISE NOTICE '%', var_table_row;
+
+        var_correction.calc_height_id := var_row.calc_height_id;
+        var_correction.height := var_row.height;
+        var_correction.temperature_deviation := var_deviation;
+        par_corrections := array_append(par_corrections, var_correction);
+    END LOOP;
+
+    RAISE NOTICE '|----------|-----------|';
+END;
+$BODY$;
+
+-- Расчет скорости среднего ветра для ДМК
+CREATE OR REPLACE PROCEDURE public.calculate_wind_speed_deviation_dmk(
+    IN par_ground_wind_speed NUMERIC,
+    IN par_measurement_type_id INTEGER,
+    INOUT par_corrections public.wind_direction_correction[]
+)
+LANGUAGE 'plpgsql'
+AS $BODY$
+DECLARE
+    var_row RECORD;
+    var_index INTEGER;
+    var_correction public.wind_direction_correction;
+    var_header_correction INTEGER[];
+    var_header_index INTEGER;
+    var_table INTEGER[];
+    var_deviation INTEGER;
+    var_table_row TEXT;
+BEGIN
+    IF coalesce(par_ground_wind_speed, -1) < 0 THEN
+        RAISE EXCEPTION 'Некорректно переданы параметры! Значение par_ground_wind_speed %', par_ground_wind_speed;
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM public.calc_height_correction 
+        WHERE measurment_type_id = par_measurement_type_id
+    ) THEN
+        RAISE EXCEPTION 'Для устройства с кодом % не найдены значения высот в таблице calc_height_correction!', par_measurement_type_id;
+    END IF;
+
+    -- Получаем индекс корректировки
+    var_index := (par_ground_wind_speed / 10)::INTEGER - 4;
+    IF var_index < 0 THEN
+        var_index := 1;
+    END IF;
+
+    -- Получаем заголовок 
+    var_header_correction := (SELECT values FROM public.calc_header_correction
+        WHERE header = 'table3'
+        AND measurment_type_id = par_measurement_type_id);
+
+    -- Проверяем данные
+    IF array_length(var_header_correction, 1) = 0 THEN
+        RAISE EXCEPTION 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+    END IF;
+
+    IF array_length(var_header_correction, 1) < var_index THEN
+        RAISE EXCEPTION 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+    END IF;
+
+    RAISE NOTICE '| Высота   | Поправка  |';
+    RAISE NOTICE '|----------|-----------|';
+
+    FOR var_row IN
+        SELECT t1.height, t2.* 
+        FROM calc_height_correction AS t1
+        INNER JOIN public.calc_wind_speed_height_correction AS t2
+        ON t2.calc_height_id = t1.id
+        WHERE t1.measurment_type_id = par_measurement_type_id
+    LOOP
+        -- Получаем индекс
+        var_header_index := abs(var_index % 10);
+        var_table := var_row.values;
+
+        -- Поправка на скорость среднего ветра
+        var_deviation := var_table[var_header_index];
+
+        SELECT '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11, ' ') || '|'
+        INTO var_table_row;
+
+        RAISE NOTICE '%', var_table_row;
+
+        var_correction.calc_height_id := var_row.calc_height_id;
+        var_correction.height := var_row.height;
+        var_correction.wind_speed_deviation := var_deviation;
+        var_correction.wind_deviation := var_row.delta;
+        par_corrections := array_append(par_corrections, var_correction);
+    END LOOP;
+
+    RAISE NOTICE '|----------|-----------|';
+END;
+$BODY$;
+
+-- Расчет направления среднего ветра для ДМК
+CREATE OR REPLACE PROCEDURE public.calculate_wind_direction_deviation_dmk(
+    IN par_wind_direction NUMERIC,
+    IN par_measurement_type_id INTEGER,
+    INOUT par_corrections public.wind_direction_correction[]
+)
+LANGUAGE 'plpgsql'
+AS $BODY$
+DECLARE
+    var_row RECORD;
+    var_correction public.wind_direction_correction;
+BEGIN
+    FOR var_row IN
+        SELECT t1.height, t2.* 
+        FROM calc_height_correction AS t1
+        INNER JOIN public.calc_wind_speed_height_correction AS t2
+        ON t2.calc_height_id = t1.id
+        WHERE t1.measurment_type_id = par_measurement_type_id
+    LOOP
+        var_correction.calc_height_id := var_row.calc_height_id;
+        var_correction.height := var_row.height;
+        var_correction.wind_speed_deviation := var_row.delta;
+        var_correction.wind_deviation := par_wind_direction + var_row.delta;
+        par_corrections := array_append(par_corrections, var_correction);
+    END LOOP;
+END;
+$BODY$;
+
+-- Тестовый расчет для ДМК
+DO $$
+DECLARE
+    var_temperature_corrections public.temperature_correction[];
+    var_wind_speed_corrections public.wind_direction_correction[];
+    var_wind_direction_corrections public.wind_direction_correction[];
+BEGIN
+    -- Пример расчета отклонений температуры для ДМК (тип оборудования 1)
+    RAISE NOTICE 'Расчет отклонений температуры для ДМК (тип оборудования 1)';
+    CALL public.calculate_temperature_deviation_dmk(
+        par_measurement_type_id => 1, -- ДМК
+        par_temperature => 3.0, -- Пример температуры
+        par_corrections => var_temperature_corrections
+    );
+    RAISE NOTICE 'Результат расчета отклонений температуры: %', var_temperature_corrections;
+
+    -- Пример расчета скорости среднего ветра для ДМК (тип оборудования 1)
+    RAISE NOTICE 'Расчет скорости среднего ветра для ДМК (тип оборудования 1)';
+    CALL public.calculate_wind_speed_deviation_dmk(
+        par_ground_wind_speed => 14.0, -- Пример скорости приземного ветра
+        par_measurement_type_id => 1, -- ДМК
+        par_corrections => var_wind_speed_corrections
+    );
+    RAISE NOTICE 'Результат расчета скорости среднего ветра: %', var_wind_speed_corrections;
+
+    -- Пример расчета направления среднего ветра для ДМК (тип оборудования 1)
+    RAISE NOTICE 'Расчет направления среднего ветра для ДМК (тип оборудования 1)';
+    CALL public.calculate_wind_direction_deviation_dmk(
+        par_wind_direction => 45.0, -- Пример направления ветра
+        par_measurement_type_id => 1, -- ДМК
+        par_corrections => var_wind_direction_corrections
+    );
+    RAISE NOTICE 'Результат расчета направления среднего ветра: %', var_wind_direction_corrections;
+END $$;
 

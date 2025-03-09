@@ -4,7 +4,7 @@ begin
 /*
 Скрипт создания информационной базы данных
 Согласно технического задания https://git.hostfl.ru/VolovikovAlex/Study2025
-Редакция 2025-02-21
+Редакция 2025-02-28
 Edit by valex
 */
 
@@ -13,6 +13,9 @@ Edit by valex
  1. Удаляем старые элементы
  ======================================
  */
+
+ drop view if exists vw_report_fails_statistics;
+ drop view if exists vw_report_fails_height_statistics;
 
 raise notice 'Запускаем создание новой структуры базы данных meteo'; 
 begin
@@ -41,6 +44,10 @@ begin
 
 	alter table if exists public.calc_header_correction
 	drop constraint  if exists measurment_type_id_fk;
+
+	alter table if exists public.calc_wind_speed_height_correction
+	drop constraint if exists calc_wind_speed_height_correction_calc_height_id_fk;
+
 	
 	-- Таблицы
 	drop table if exists public.measurment_input_params;
@@ -53,6 +60,7 @@ begin
 	drop table if exists public.calc_temperature_correction;
 	drop table if exists public.calc_temperature_height_correction;
 	drop table if exists public.calc_header_correction;
+	drop table if exists public.calc_wind_speed_height_correction;
 
 	-- Нумераторы
 	drop sequence if exists public.measurment_input_params_seq cascade;
@@ -63,6 +71,7 @@ begin
 	drop sequence if exists public.calc_height_correction_seq cascade;
 	drop sequence if exists public.calc_temperature_height_correction_seq cascade;
 	drop sequence if exists public.calc_header_correction_seq cascade;
+	drop sequence if exists public.calc_wind_speed_height_correction_seq cascade;
 end;
 
 raise notice 'Удаление старых данных выполнено успешно';
@@ -230,24 +239,42 @@ create type temperature_correction as
 (
 	calc_height_id integer,
 	height integer,
-	deviation integer
+	-- Приращение по температуре
+	temperature_deviation integer
+);
+
+-- Результат расчета скорости среднего ветра и приращение среднего ветра
+drop type if exists wind_direction_correction cascade;
+create type wind_direction_correction as
+(
+	calc_height_id integer,
+	height integer,
+	-- Приращение по скорости ветра
+	wind_speed_deviation integer,
+	-- Приращение среднего ветра
+	wind_deviation integer
 );
 
 
-
--- Таблица 2 для пересчета поправок по температуре
+-- Таблица заголовков к поправочных таблицам
 create sequence calc_header_correction_seq;
 create table calc_header_correction
 (
 	id integer not null primary key default nextval('public.calc_header_correction_seq'),
 	measurment_type_id integer not null,
+	header varchar(100) not null,
 	description text not null,
 	values integer[] not null
 );
 
-insert into calc_header_correction(measurment_type_id, description, values) 
-values (1, 'Заголовок для Таблицы № 2 (ДМК)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]),
-       (2, 'Заголовок для Таблицы № 2 (ВР)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]);
+-- Добавим уникальный индекс для отсечки ошибок
+create unique index ix_calc_header_correction_header_type on calc_header_correction(measurment_type_id, header);
+
+-- Добавим заголовки
+insert into calc_header_correction(measurment_type_id, header, description, values) 
+values (1, 'table2', 'Заголовок для Таблицы № 2 (ДМК)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]),
+       (2, 'table2','Заголовок для Таблицы № 2 (ВР)', array[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 40, 50]),
+	   (2, 'table3', 'Заголовок для Таблицы № 3 (ВР)', array[40,50,60,70,80,90,100,110,120,130,140,150]);
 
 
 -- Таблица 2 список высот в разрезе типа оборудования
@@ -275,6 +302,22 @@ create table calc_temperature_height_correction
 	negative_values numeric[]
 );
 
+-- Данные для ветрового ружья
+insert into calc_temperature_height_correction(calc_height_id, calc_temperature_header_id, positive_values, negative_values)
+values
+(10,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -3, -4, -5, -6, -7, -8, -8, -9, -20, -29, -39, -49]), --200
+(11,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -8, -9, -19, -29, -38, -48]), --400
+(12,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -5, -6, -6, -7, -7, -8, -18, -28, -37, -46]), --800
+(13,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -4, -4, -5, -5, -6, -7, -8, -17, -26, -35, -44]), --1200
+(14,1,array[ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -7, -7, -17, -25, -34, -42]), --1600
+(15,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -3, -3, -4, -4, -5, -6, -6, -7, -16, -24, -32, -40]), --2000
+(16,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38]), --2400
+(17,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37]), --3000
+(18,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34]); --4000
+
+
+
+-- Данные для ДМК
 insert into calc_temperature_height_correction(calc_height_id, calc_temperature_header_id, positive_values, negative_values)
 values
 (1,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -3, -4, -5, -6, -7, -8, -8, -9, -20, -29, -39, -49]), --200
@@ -286,7 +329,35 @@ values
 (7,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -5, -5, -6, -7, -15, -23, -31, -38]), --2400
 (8,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[-1, -2, -2, -3, -4, -4, -4, -5, -5, -6, -15, -22, -30, -37]), --3000
 (9,1,array[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 20, 30, 30, 30], array[ -1, -2, -2, -3, -4, -4, -4, -4, -5, -6, -14, -20, -27, -34]); --4000
-	
+
+
+-- Таблица 3 корректировка сноса пуль
+-- Для расчета приращение среднего ветра относительно направления приземного ветра
+create sequence calc_wind_speed_height_correction_seq;
+drop table if exists calc_wind_speed_height_correction;
+create table calc_wind_speed_height_correction
+(
+	id integer not null primary key default nextval('public.calc_wind_speed_height_correction_seq'),
+	calc_height_id integer not null,
+	values integer[] not null,
+	delta integer not null
+);
+
+-- Для ветрового ружья
+insert into calc_wind_speed_height_correction(calc_height_id, values, delta)
+values
+(10, array[3, 4, 5, 6, 7, 7, 8, 9, 10, 11, 12, 12], 0),	-- 200
+(11, array[4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 1),-- 400
+(12, array[4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16], 2), -- 800
+(13, array[4, 5, 7, 8, 8, 9, 11, 12, 13, 15, 15, 16], 2), -- 1200
+(14, array[4, 6, 7, 8, 9, 10, 11, 13, 14, 15, 17, 17], 3), -- 1600
+(15, array[4, 6, 7, 8, 9, 10, 11, 13, 14, 16, 17, 18], 3), -- 2000
+(16, array[4, 6, 8, 9, 9, 10, 12, 14, 15, 16, 18, 19], 3), -- 2400
+(17, array[5, 6, 8, 9, 10, 11, 12, 14, 15, 17, 18, 19], 4), -- 3000
+(18, array[5, 6, 8, 9, 10, 11, 12, 14, 16, 18, 19, 20],4) -- 4000
+;
+
+
 	  
 raise notice 'Расчетные структуры сформированы';
 
@@ -344,9 +415,21 @@ begin
 	foreign key(military_rank_id)
 	references public.military_ranks (id);
 
+	-- Связь между высотами и таблицей корректировки сноса пуль
+	alter table public.calc_wind_speed_height_correction
+	add constraint calc_wind_speed_height_correction_calc_height_id_fk
+	foreign key(calc_height_id)
+	references public.calc_height_correction (id);
+
 end;
 
 raise notice 'Связи сформированы';
+raise notice 'Формируем индексы';
+
+create index if not exists ix_measurment_baths_emploee_id on public.measurment_baths(emploee_id);
+create index if not exists ix_measurment_baths_measurment_input_param_id on public.measurment_baths(measurment_input_param_id);
+
+raise notice 'Индексы сформирован';
 
 /*
  4. Создает расчетные и вспомогательные функции
@@ -393,13 +476,20 @@ $BODY$;
 drop function if exists public.fn_calc_header_period;
 create function public.fn_calc_header_period(
 	par_period timestamp with time zone)
-    RETURNS text
-    LANGUAGE 'sql'
-    COST 100
-    VOLATILE PARALLEL UNSAFE
-
-RETURN ((((CASE WHEN (EXTRACT(day FROM par_period) < (10)::numeric) THEN '0'::text ELSE ''::text END || (EXTRACT(day FROM par_period))::text) || CASE WHEN (EXTRACT(hour FROM par_period) < (10)::numeric) THEN '0'::text ELSE ''::text END) || (EXTRACT(hour FROM par_period))::text) || "left"(CASE WHEN (EXTRACT(minute FROM par_period) < (10)::numeric) THEN '0'::text ELSE (EXTRACT(minute FROM par_period))::text END, 1));
-
+    returns text
+    language 'sql'
+return  
+		-- ДД
+		case when (extract(day from par_period) < 10::numeric) then '0'::text else ''::text end || 
+		extract(day from par_period)::text || 
+		-- ЧЧ
+		case when (extract(hour from par_period) < 10::numeric) then '0'::text else ''::text end || 
+		extract(hour from par_period)::text || 
+		-- Десятки минут
+		case when (extract(minute from par_period) < 10::numeric) then '0'::text
+				else 
+					left(extract(minute from par_period)::text, 1) 
+		end;
 
 -- Функция для расчета отклонения наземного давления
 drop function if exists public.fn_calc_header_pressure;
@@ -765,7 +855,7 @@ begin
 end;
 $body$;
 
--- Процедура для расчета поправко по температуре по высотам
+-- Процедура для расчета поправок по температуре в разрезе высот
 create procedure public.sp_calc_temperature_deviation(
 	in par_temperature_correction numeric(8,2),
 	in par_measurement_type_id integer,
@@ -783,6 +873,7 @@ declare
 	var_deviation integer;
 	var_table integer[];
 	var_correction temperature_correction;
+	var_table_row text;
 begin
 
 -- Проверяем наличие данные в таблице
@@ -801,6 +892,10 @@ if not exists (
 	
 	end if;
 
+
+	raise notice '| Высота   | Поправка  |';
+	raise notice '|----------|-----------|';
+
 	for var_row in 
 			-- Запрос на выборку высот
 			select t2.*, t1.height 
@@ -813,7 +908,7 @@ if not exists (
 			var_index := par_temperature_correction::integer;
 			-- Получаем заголовок 
 			var_header_correction := (select values from public.calc_header_correction
-				where id = var_row.calc_temperature_header_id );
+				where id = var_row.calc_temperature_header_id and header = 'table2');
 
 			-- Проверяем данные
 			if array_length(var_header_correction, 1) = 0 then
@@ -846,24 +941,120 @@ if not exists (
 
 			-- Поправка на высоту	
 			var_deviation:= var_table[ var_left_index  ] + var_table[ var_right_index     ];
-			
-			raise notice 'Для высоты % получили следующую поправку %', var_row.height, var_deviation;
+
+			select '|' || lpad(var_row.height::text,10, ' ') || '|' || lpad(var_deviation::text,11,' ') || '|'
+			into
+				var_table_row;
+				
+			raise notice '%', var_table_row;
 
 			var_correction.calc_height_id := var_row.calc_height_id;
 			var_correction.height := var_row.height;
-			var_correction.deviation := var_deviation;
+			var_correction.temperature_deviation := var_deviation;
 			par_corrections := array_append(par_corrections, var_correction);
 	end loop;
 
+	raise notice '|----------|-----------|';
+
 end;
 $BODY$;
+
+-- Процедура для расчета скорости среднего ветра и направления среднего ветра
+create or replace procedure public.sp_calc_wind_speed_deviation(
+	IN par_bullet_demolition_range numeric,
+	IN par_measurement_type_id integer,
+	INOUT par_corrections wind_direction_correction[])
+language 'plpgsql'
+as $body$
+declare
+	var_row record;
+	var_index integer;
+	var_correction wind_direction_correction;
+	var_header_correction integer[];
+	var_header_index integer;
+	var_table integer[];
+	var_deviation integer;
+	var_table_row text;
+begin
+
+	if coalesce(par_bullet_demolition_range, -1) < 0 then
+		raise exception 'Некорректно переданы параметры! Значение par_bullet_demolition_range %', par_bullet_demolition_range; 
+	end if;
+	
+	if not exists ( select 1 from public.calc_height_correction 
+			where measurment_type_id = par_measurement_type_id) then
+
+		raise exception 'Для устройства с кодом % не найдены значения высот в таблице calc_height_correction!', par_measurement_type_id;
+	end if;	
+
+	-- Получаем индекс корректировки
+	var_index := (par_bullet_demolition_range / 10)::integer - 4;
+	if var_index < 0 then
+		var_index := 1;
+	end if;	
+
+
+	-- Получаем заголовок 
+	var_header_correction := (select values from public.calc_header_correction
+				where 
+					header = 'table3'
+					and measurment_type_id  = par_measurement_type_id );
+
+	-- Проверяем данные
+	if array_length(var_header_correction, 1) = 0 then
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+	end if;
+
+	if array_length(var_header_correction, 1) < var_index then
+		raise exception 'Невозможно произвести расчет по высоте. Некорректные исходные данные или настройки';
+	end if;			
+
+	raise notice '| Высота   | Поправка  |';
+	raise notice '|----------|-----------|';
+	
+	for var_row in
+		select t1.height, t2.* from calc_height_correction as t1
+		inner join public.calc_wind_speed_height_correction as t2
+		on t2.calc_height_id = t1.id
+		where  
+			t1.measurment_type_id = par_measurement_type_id loop
+
+		-- Получаем индекс
+		var_header_index := abs(var_index % 10);
+		var_table := var_row.values;
+
+		-- Поправка на скорость среднего ветра
+		var_deviation:= var_table[ var_header_index  ];
+
+		select '|' || lpad(var_row.height::text, 10, ' ') || '|' || lpad(var_deviation::text, 11,' ') || '|'
+		into
+			var_table_row;
+				
+		raise notice '%', var_table_row;
+
+		var_correction.calc_height_id := var_row.calc_height_id;
+		var_correction.height := var_row.height;
+
+		-- Скорость среднего ветра
+		var_correction.wind_speed_deviation := var_deviation;
+
+		-- Приращение среднего ветра относительно направления приземного ветра
+		var_correction.wind_deviation = var_row.delta;
+		
+		par_corrections := array_append(par_corrections, var_correction);
+	end loop;	
+
+	raise notice '|----------|-----------|';
+
+end;
+$body$;
 
 
 
 raise notice 'Структура сформирована успешно';
 end $$;
 
-
+-- //////////////////////////////////////////////////////////////////////////////
 -- Проверка расчета
 do $$
 declare
@@ -952,14 +1143,24 @@ end $$;
 -- Проверка расчета поправок по высоте для температуры
 do $$
 declare
-	var_corrections public.temperature_correction[];
+	var_temperature_corrections temperature_correction[];
+	var_wind_speed_corrections wind_direction_correction[];
 begin
 	raise notice 'Проверка расчета поправок к температуре по высоте [sp_calc_temperature_deviation]';
 
-	call public.sp_calc_temperature_deviation( par_temperature_correction => 3::numeric,  par_measurement_type_id => 1::integer, 
-			par_corrections => var_corrections::public.temperature_correction[]);
-	raise notice 'Результат расчета для корректировки 3 и типа оборудования 1: % ',  var_corrections;
+	call public.sp_calc_temperature_deviation( par_temperature_correction => 3::numeric,  par_measurement_type_id => 2::integer, 
+			par_corrections => var_temperature_corrections::public.temperature_correction[]);
+	
+	raise notice 'Результат расчета для корректировки по температуре 3 и типа оборудования 2: % ',  var_temperature_corrections;
 	raise notice '=====================================';
+
+	raise notice 'Проверка расчета поправок к скорости ветра и направления [sp_calc_wind_speed_deviation]';
+	call public.sp_calc_wind_speed_deviation( par_bullet_demolition_range => 14::numeric,  par_measurement_type_id => 2::integer, 
+			par_corrections => var_wind_speed_corrections::public.wind_direction_correction[]);
+
+	raise notice 'Результат расчета для сноса пуль 14 и типа оборудования 2: % ',  var_wind_speed_corrections;
+	raise notice '=====================================';		
+	
 end $$;
 
 -- Генерация тестовых данных
@@ -1028,34 +1229,29 @@ begin
 	
 end $$;
 
-/*
-Написать SQL запрос для формирования отчета вида:
-ФИО  | Должность | Кол-во измерений | Количество ошибочных данных |
-Отсортировать по полю "Количество ошибочных данных"
-*/
 
-
-select
-	user_name, position, quantity, quantity_fails
-from
+create  view vw_report_fails_statistics
+as
+-- Отчет:  Статистика ошибок при проведении измерений
+-- ФИО, должность, количество измерений, количество ошибок
+with emploee_cte as
 (
-	select 
-			-- ФИО  | Должность
-			t1.id , t1.name as user_name, t2.description as position,
-			coalesce(tt1.quantity, 0 ) as quantity,
-			coalesce(tt2.quantity_fails, 0) as quantity_fails
+		-- ФИО  | Должность
+		select 
+			t1.id , t1.name as user_name, t2.description as position
 			from public.employees as t1
-	inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
-	left join
-	(
+			inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
+),
+measurements_cte as
+(
 		--  Кол-во измерений
 		select count(*) as quantity,  emploee_id 
 		from public.measurment_input_params as t1
 		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
 		group by emploee_id
-	) as tt1 on tt1.emploee_id = t1.id
-	left join
-	(
+), 
+fails_cte as
+(
 		-- Количество ошибочных данных
 		select 
 			count(*) as quantity_fails,
@@ -1065,9 +1261,68 @@ from
 		where
 			(public.fn_check_input_params(height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range)::public.check_result).is_check = False
 		group by emploee_id
-	) as tt2 on tt2.emploee_id = t1.id
-) as tt
-order by tt.quantity_fails desc
+)
+-- Основной запрос
+select 
+	user_name, position, coalesce(quantity,0) as quantity, coalesce(quantity_fails,0) as quantity_fails
+from emploee_cte as t1
+left join measurements_cte as t2 on t1.id = t2.emploee_id
+left join fails_cte as t3 on t1.id = t3.emploee_id
+order by coalesce(quantity_fails,0) desc;
+
+
+create view vw_report_fails_height_statistics
+as
+-- Отчет: "Самая эффективная высота измерения"
+-- | ФИО пользователя | Звание | Мин. высота метеопоста | Макс. высота метепоста | Всего измерений | Из них ошибочны |
+with emploee_cte as
+(
+		-- ФИО  | Должность
+		select 
+			t1.id , t1.name as user_name, t2.description as position
+			from public.employees as t1
+			inner join public.military_ranks as t2 on t1.military_rank_id = t2.id
+),
+measurements_cte as
+(
+		--  Кол-во измерений
+		select count(*) as quantity,  emploee_id 
+		from public.measurment_input_params as t1
+		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+		group by emploee_id
+), 
+fails_cte as
+(
+		-- Количество ошибочных данных
+		select 
+			count(*) as quantity_fails,
+			emploee_id 
+		from public.measurment_input_params as t1
+		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+		where
+			(public.fn_check_input_params(height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range)::public.check_result).is_check = False
+		group by emploee_id
+),
+measurments_height_cte as
+(
+		--  Статистика по высотам
+		select min(height) as min_height, max(height) as max_height,  emploee_id 
+		from public.measurment_input_params as t1
+		inner join public.measurment_baths as t2 on t2.measurment_input_param_id = t1.id
+		group by emploee_id
+)
+-- Основной запрос
+select 
+	user_name, position, coalesce(quantity,0) as quantity, coalesce(quantity_fails,0) as quantity_fails, 
+		coalesce(min_height, 0) as min_height, coalesce(max_height, 0) as max_height 
+from emploee_cte as t1
+left join measurements_cte as t2 on t1.id = t2.emploee_id
+left join fails_cte as t3 on t1.id = t3.emploee_id
+left join measurments_height_cte as t4 on t1.id = t4.emploee_id
+order by coalesce(quantity_fails,0) asc, coalesce(min_height, 0) asc ;
+
+-- Проверка отчета
+select * from vw_report_fails_height_statistics
 
 
 

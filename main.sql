@@ -1297,6 +1297,7 @@ CREATE SEQUENCE temp_input_params_seq;
 CREATE TABLE temp_input_params (
     id INTEGER NOT NULL PRIMARY KEY DEFAULT nextval('public.temp_input_params_seq'),
     emploee_name VARCHAR(100),
+    military_rank_id INTEGER;
     measurment_type_id INTEGER NOT NULL,
     height NUMERIC(8,2) DEFAULT 0,
     temperature NUMERIC(8,2) DEFAULT 0,
@@ -1324,6 +1325,8 @@ DECLARE
     var_input_params public.input_params_type;
     var_response public.calc_result_response_type;
     var_calc_result public.calc_result_type[];
+    var_employee_id INTEGER;
+    var_military_rank_id INTEGER;
 BEGIN
     -- Проверяем параметры
     var_check_result := fn_check_input_params(
@@ -1358,12 +1361,40 @@ BEGIN
     var_response.calc_result := var_calc_result;
     NEW.calc_result := row_to_json(var_response);
 
+    -- Ищем пользователя по имени и рангу
+    SELECT id INTO var_employee_id
+    FROM public.employees
+    WHERE name = NEW.emploee_name
+      AND military_rank_id = NEW.military_rank_id;
+
+    -- Если пользователь не найден, создаем нового
+    IF var_employee_id IS NULL THEN
+        -- Проверяем, существует ли переданный ранг
+        SELECT id INTO var_military_rank_id
+        FROM public.military_ranks
+        WHERE id = NEW.military_rank_id;
+
+        -- Если ранг не существует - ошибка
+        IF var_military_rank_id IS NULL THEN
+            RAISE EXCEPTION 'Переданный ранг с ID % не существует', NEW.military_rank_id;
+        END IF;
+
+        -- Вставляем нового пользователя с переданным рангом
+        INSERT INTO public.employees (name, military_rank_id)
+        VALUES (NEW.emploee_name, var_military_rank_id)
+        RETURNING id INTO var_employee_id;
+    END IF;
+
     -- Копируем данные в основные таблицы
     INSERT INTO public.measurment_input_params (
         measurment_type_id, height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range
     ) VALUES (
         NEW.measurment_type_id, NEW.height, NEW.temperature, NEW.pressure, NEW.wind_direction, NEW.wind_speed, NEW.bullet_demolition_range
     ) RETURNING id INTO NEW.measurment_input_params_id;
+
+    -- Связываем измерение с пользователем
+    INSERT INTO public.measurment_baths (emploee_id, measurment_input_param_id, started)
+    VALUES (var_employee_id, NEW.measurment_input_params_id, NOW());
 
     -- Возвращаем обновленную запись
     RETURN NEW;

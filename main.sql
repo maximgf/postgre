@@ -1290,7 +1290,121 @@ $body$;
 -- Проверка отчета
 select * from vw_report_fails_height_statistics
 
+----------------------------------------------------
 
+-- Создание временной таблицы temp_input_params
+CREATE SEQUENCE temp_input_params_seq;
+CREATE TABLE temp_input_params (
+    id INTEGER NOT NULL PRIMARY KEY DEFAULT nextval('public.temp_input_params_seq'),
+    emploee_name VARCHAR(100),
+    military_rank_id INTEGER;
+    measurment_type_id INTEGER NOT NULL,
+    height NUMERIC(8,2) DEFAULT 0,
+    temperature NUMERIC(8,2) DEFAULT 0,
+    pressure NUMERIC(8,2) DEFAULT 0,
+    wind_direction NUMERIC(8,2) DEFAULT 0,
+    wind_speed NUMERIC(8,2) DEFAULT 0,
+    bullet_demolition_range NUMERIC(8,2) DEFAULT 0,
+    measurment_input_params_id INTEGER,
+    error_message TEXT,
+    calc_result JSONB
+);
 
+-- Создание типа для хранения результата расчета
+DROP TYPE IF EXISTS public.calc_result_response_type CASCADE;
+CREATE TYPE public.calc_result_response_type AS (
+    header VARCHAR(100),
+    calc_result public.calc_result_type[]
+);
+
+-- Создание триггерной функции
+CREATE OR REPLACE FUNCTION fn_tr_temp_input_params()
+RETURNS TRIGGER AS $$
+DECLARE 
+    var_check_result public.check_result_type;
+    var_input_params public.input_params_type;
+    var_response public.calc_result_response_type;
+    var_calc_result public.calc_result_type[];
+    var_employee_id INTEGER;
+    var_military_rank_id INTEGER;
+BEGIN
+    -- Проверяем параметры
+    var_check_result := fn_check_input_params(
+        NEW.height,
+        NEW.temperature,
+        NEW.pressure,
+        NEW.wind_direction,
+        NEW.wind_speed,
+        NEW.bullet_demolition_range
+    );
+
+    -- Если проверка не пройдена, возвращаем ошибку
+    IF var_check_result.is_check = FALSE THEN
+        NEW.error_message := var_check_result.error_message;
+        RETURN NEW;
+    END IF;
+
+    -- Формируем входные параметры
+    var_input_params := var_check_result.params;
+
+    -- Формируем заголовок
+    var_response.header := public.fn_calc_header_meteo_avg(var_input_params);
+
+    -- Выполняем расчет
+    CALL public.sp_calc_corrections(
+        par_input_params => var_input_params,
+        par_measurement_type_id => NEW.measurment_type_id,
+        par_results => var_calc_result
+    );
+
+    -- Сохраняем результат расчета
+    var_response.calc_result := var_calc_result;
+    NEW.calc_result := row_to_json(var_response);
+
+    -- Ищем пользователя по имени и рангу
+    SELECT id INTO var_employee_id
+    FROM public.employees
+    WHERE name = NEW.emploee_name
+      AND military_rank_id = NEW.military_rank_id;
+
+    -- Если пользователь не найден, создаем нового
+    IF var_employee_id IS NULL THEN
+        -- Проверяем, существует ли переданный ранг
+        SELECT id INTO var_military_rank_id
+        FROM public.military_ranks
+        WHERE id = NEW.military_rank_id;
+
+        -- Если ранг не существует - ошибка
+        IF var_military_rank_id IS NULL THEN
+            RAISE EXCEPTION 'Переданный ранг с ID % не существует', NEW.military_rank_id;
+        END IF;
+
+        -- Вставляем нового пользователя с переданным рангом
+        INSERT INTO public.employees (name, military_rank_id)
+        VALUES (NEW.emploee_name, var_military_rank_id)
+        RETURNING id INTO var_employee_id;
+    END IF;
+
+    -- Копируем данные в основные таблицы
+    INSERT INTO public.measurment_input_params (
+        measurment_type_id, height, temperature, pressure, wind_direction, wind_speed, bullet_demolition_range
+    ) VALUES (
+        NEW.measurment_type_id, NEW.height, NEW.temperature, NEW.pressure, NEW.wind_direction, NEW.wind_speed, NEW.bullet_demolition_range
+    ) RETURNING id INTO NEW.measurment_input_params_id;
+
+    -- Связываем измерение с пользователем
+    INSERT INTO public.measurment_baths (emploee_id, measurment_input_param_id, started)
+    VALUES (var_employee_id, NEW.measurment_input_params_id, NOW());
+
+    -- Возвращаем обновленную запись
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Создание триггера
+CREATE TRIGGER tr_temp_input_params
+BEFORE INSERT ON temp_input_params
+FOR EACH ROW
+EXECUTE FUNCTION fn_tr_temp_input_params();
 
 
